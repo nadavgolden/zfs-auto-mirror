@@ -1,0 +1,82 @@
+LOG_DEBUG=1
+LOG_INFO=2
+LOG_WARNING=3
+LOG_ERROR=4
+
+LOG_LEVEL=${LOG_INFO}
+PANIC=1
+
+log_debug() {
+    if [ ${LOG_LEVEL} -le ${LOG_DEBUG} ] ; then
+        echo [DEBUG] $*
+    fi
+}
+
+log_info() {
+    if [ ${LOG_LEVEL} -le ${LOG_INFO} ] ; then
+        echo [INFO] $*
+    fi
+}
+
+log_warning() {
+    if [ ${LOG_LEVEL} -le ${LOG_WARNING} ] ; then
+        echo [WARNING] $*
+    fi
+}
+
+log_error() {
+    if [ ${LOG_LEVEL} -le ${LOG_ERROR} ] ; then
+        echo [ERROR] $*
+    fi
+}
+
+# do_backup user target remote_dataset local_dataset
+do_backup() {
+    USER=$1
+    TARGET=$2
+    REMOTE_DATASET=$3
+    LOCAL_DATASET=$4
+    
+    for FREQUENCY in "frequent" "hourly" "daily" "weekly" "monthly"; do
+        log_debug "Trying to mirror ${FREQUENCY} snapshot"
+
+        LAST_LOCAL_SNAP_TAG=$(zfs list -t snapshot -H -S creation -o name -d 1 ${LOCAL_DATASET} | grep zfs-auto-snap_${FREQUENCY} | head -1 | cut -d "@" -f2-)
+        log_debug "Last local snapshot: ${LAST_LOCAL_SNAP_TAG}"
+
+        LAST_TARGET_SNAP=$(ssh ${USER}@${TARGET} zfs list -t snapshot -H -S creation -o name -d 1 ${REMOTE_DATASET} | grep zfs-auto-snap_${FREQUENCY} | head -1)
+        LAST_TARGET_SNAP_TAG=$(echo ${LAST_TARGET_SNAP} | cut -d "@" -f2-)
+        log_debug "Last snapshot of ${REMOTE_DATASET}: ${LAST_TARGET_SNAP_TAG}"
+
+        if [ -z "${LAST_TARGET_SNAP}" ]; then
+            log_warning "Target snapshot not found in frequency: ${FREQUENCY}"
+            continue
+        fi
+
+        if [ "${LAST_LOCAL_SNAP_TAG}" = "${LAST_TARGET_SNAP_TAG}" ]; then
+            log_info "Dataset up-to-date, aborting."
+            exit 1
+        fi
+
+        ssh ${USER}@${TARGET} "zfs send -c -I ${REMOTE_DATASET}@${LAST_LOCAL_SNAP_TAG} ${LAST_TARGET_SNAP} | gzip" | gzip -d | zfs recv -F -v ${LOCAL_DATASET} && return 0 || log_error "Failed to send incremental snapshot"
+    done
+
+    if [ ${PANIC} -eq 1 ]; then
+        log_warning "Panicing and sending entire dataset"
+        PANIC_SNAP="${REMOTE_DATASET}@zfs-auto-backup_panic-$(date -u +%F-%H%M)"
+        ssh ${USER}@${TARGET} "zfs snapshot ${PANIC_SNAP}" || (log_error "Failed while panicing, aborting" && exit 1)
+        ssh ${USER}@${TARGET} "zfs send -c ${PANIC_SNAP} | gzip" | gzip -d | zfs recv -F -v ${LOCAL_DATASET} && log_info "Panic succeeded" && return 0
+    fi
+
+    log_debug "failed to mirror dataset, aborting" && exit 1
+}
+
+main() {
+    USER=$1
+    TARGET=$2
+    REMOTE_DATASET=$3
+    LOCAL_DATASET=$4
+
+    do_backup ${USER} ${TARGET} ${REMOTE_DATASET} ${LOCAL_DATASET}
+}
+
+main $*
