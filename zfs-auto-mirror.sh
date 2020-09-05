@@ -5,30 +5,30 @@ LOG_INFO=2
 LOG_WARNING=3
 LOG_ERROR=4
 
-LOG_LEVEL=${LOG_DEBUG}
-FORCE_MIRROR=1
+LOG_LEVEL=${LOG_WARNING}
+FORCE_MIRROR=0
 
 log_debug() {
     if [ ${LOG_LEVEL} -le ${LOG_DEBUG} ] ; then
-        echo [DEBUG] $*
+        echo "\e[32m[DEBUG]\e[39m $*"
     fi
 }
 
 log_info() {
     if [ ${LOG_LEVEL} -le ${LOG_INFO} ] ; then
-        echo [INFO] $*
+        echo "\e[34m[INFO]\e[39m $*"
     fi
 }
 
 log_warning() {
     if [ ${LOG_LEVEL} -le ${LOG_WARNING} ] ; then
-        echo >&2 [WARNING] $*
+        echo >&2 "\e[33m[WARNING]\e[39m $*"
     fi
 }
 
 log_error() {
     if [ ${LOG_LEVEL} -le ${LOG_ERROR} ] ; then
-        echo >&2 [ERROR] $*
+        echo >&2 "\e[31m[ERROR]\e[39m $*"
     fi
 }
 
@@ -137,7 +137,49 @@ mirror() {
 
 }
 
+print_usage() {
+    echo "Usage: $0 [options] target remote_dataset local_dataset
+  options:
+    -d N  Print N-th log level (1=DEBUG, 2=INFO, 3=WARNING, 4=ERROR)
+    -f    Force full sync if conflict is detected between local and remote snapshots
+  
+  positional:
+    target          user@remote, used for SSH
+    remote_dataset  The dataset to mirror from
+    local_dataset   The dataset to mirror into"
+}
+
 main() {
+    GETOPT=$(getopt -o=fd: -- $@) || exit 1
+    eval set -- "${GETOPT}"
+
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            (-f)
+                FORCE_MIRROR=1
+                shift 1
+                ;;
+            (-d)
+                LOG_LEVEL=$2
+                shift 2
+                ;;
+            (-h)
+                print_usage
+                exit 0
+                ;;
+            (--)
+                shift 1
+                break
+                ;;
+        esac
+    done
+
+    if [ "$#" -ne "3" ]; then
+        echo Invalid number of arguments
+        print_usage
+        exit 1
+    fi
+
     local TARGET=$1
     local REMOTE_DATASET=$2
     local LOCAL_DATASET=$3
