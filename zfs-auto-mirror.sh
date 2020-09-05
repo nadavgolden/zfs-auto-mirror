@@ -6,7 +6,7 @@ LOG_WARNING=3
 LOG_ERROR=4
 
 LOG_LEVEL=${LOG_DEBUG}
-FORCE_MIRROR=0
+FORCE_MIRROR=1
 
 log_debug() {
     if [ ${LOG_LEVEL} -le ${LOG_DEBUG} ] ; then
@@ -41,7 +41,7 @@ send_incremental() {
 
     log_debug "Sending incremental backup from ${SNAP1} to ${SNAP2}"
 
-    ssh ${TARGET} "zfs send -c -I ${SNAP1} ${SNAP2} | gzip" | gzip -d | zfs recv -F -v ${LOCAL_DATASET}
+    ssh ${TARGET} "zfs send -c -i ${SNAP1} ${SNAP2} | gzip" | gzip -d | zfs recv -F -v ${LOCAL_DATASET}
     # echo "ssh ${TARGET} zfs send -c -I ${SNAP1} ${SNAP2} | gzip \| gzip -d \| zfs recv -F -v ${LOCAL_DATASET}" && return 0
     # did not work
     return $?
@@ -59,9 +59,9 @@ send_full_sync() {
     return $?
 }
 
-# do_backup target remote_dataset local_dataset
+# mirror target remote_dataset local_dataset
 # target - user@host
-# remote_dataset - dataset to mirror
+# remote_dataset - dataset to mirror from
 # local_dataset - mirrored dataset
 mirror() {
     local TARGET=$1
@@ -80,6 +80,12 @@ mirror() {
     # if remote dataset does not exist, there is nothing to do
     if [ -z "$(ssh ${TARGET} "zfs list -H -o name | grep ${REMOTE_DATASET}")" ]; then
         log_error "Remote dataset \"${REMOTE_DATASET}\" does not exist"
+        return 1
+    fi
+
+    # if remote dataset has no snapshots, there is nothing to backup
+    if [ -z "${REMOTE_SNAPSHOTS}" ]; then
+        log_error "Remote dataset \"${REMOTE_DATASET}\" has no snapshots"
         return 1
     fi
 
@@ -121,7 +127,14 @@ mirror() {
         done
     done
 
-    log_info "failed to find valid incremental sync"
+    log_error "Failed to find valid incremental sync"
+
+    if [ ${FORCE_MIRROR} -eq 1 ]; then
+        log_warning "Forcing full sync"
+        zfs destroy -r ${LOCAL_DATASET} || (log_error "Failed to destroy ${LOCAL_DATASET}" && return 1)
+        send_full_sync ${TARGET} ${REMOTE_DATASET}@${LAST_REMOTE_SNAPSHOT} ${LOCAL_DATASET} || (log_error "Failed to forcibly sync" && return 1)
+    fi
+
 }
 
 main() {
