@@ -1,3 +1,5 @@
+#!/bin/sh
+
 LOG_DEBUG=1
 LOG_INFO=2
 LOG_WARNING=3
