@@ -3,8 +3,8 @@ LOG_INFO=2
 LOG_WARNING=3
 LOG_ERROR=4
 
-LOG_LEVEL=${LOG_INFO}
-PANIC=1
+LOG_LEVEL=${LOG_DEBUG}
+FORCE_MIRROR=0
 
 log_debug() {
     if [ ${LOG_LEVEL} -le ${LOG_DEBUG} ] ; then
@@ -20,63 +20,115 @@ log_info() {
 
 log_warning() {
     if [ ${LOG_LEVEL} -le ${LOG_WARNING} ] ; then
-        echo [WARNING] $*
+        echo >&2 [WARNING] $*
     fi
 }
 
 log_error() {
     if [ ${LOG_LEVEL} -le ${LOG_ERROR} ] ; then
-        echo [ERROR] $*
+        echo >&2 [ERROR] $*
     fi
 }
 
-# do_backup user target remote_dataset local_dataset
-do_backup() {
-    USER=$1
-    TARGET=$2
-    REMOTE_DATASET=$3
-    LOCAL_DATASET=$4
-    
-    for FREQUENCY in "frequent" "hourly" "daily" "weekly" "monthly"; do
-        log_debug "Trying to mirror ${FREQUENCY} snapshot"
+# send_incremental target snap1 snap2 local_dataset
+send_incremental() {
+    local TARGET=$1
+    local SNAP1=$2
+    local SNAP2=$3
+    local LOCAL_DATASET=$4
 
-        LAST_LOCAL_SNAP_TAG=$(zfs list -t snapshot -H -S creation -o name -d 1 ${LOCAL_DATASET} | grep zfs-auto-snap_${FREQUENCY} | head -1 | cut -d "@" -f2-)
-        log_debug "Last local snapshot: ${LAST_LOCAL_SNAP_TAG}"
+    log_debug "Sending incremental backup from ${SNAP1} to ${SNAP2}"
 
-        LAST_TARGET_SNAP=$(ssh ${USER}@${TARGET} zfs list -t snapshot -H -S creation -o name -d 1 ${REMOTE_DATASET} | grep zfs-auto-snap_${FREQUENCY} | head -1)
-        LAST_TARGET_SNAP_TAG=$(echo ${LAST_TARGET_SNAP} | cut -d "@" -f2-)
-        log_debug "Last snapshot of ${REMOTE_DATASET}: ${LAST_TARGET_SNAP_TAG}"
+    ssh ${TARGET} "zfs send -c -I ${SNAP1} ${SNAP2} | gzip" | gzip -d | zfs recv -F -v ${LOCAL_DATASET}
+    # echo "ssh ${TARGET} zfs send -c -I ${SNAP1} ${SNAP2} | gzip \| gzip -d \| zfs recv -F -v ${LOCAL_DATASET}" && return 0
+    # did not work
+    return $?
+}
 
-        if [ -z "${LAST_TARGET_SNAP}" ]; then
-            log_warning "Target snapshot not found in frequency: ${FREQUENCY}"
-            continue
-        fi
+# send_full_sync target remote_snapshot local_dataset
+send_full_sync() {
+    local TARGET=$1
+    local REMOTE_SNAP=$2
+    local LOCAL_DATASET=$3
 
-        if [ "${LAST_LOCAL_SNAP_TAG}" = "${LAST_TARGET_SNAP_TAG}" ]; then
-            log_info "Dataset up-to-date, aborting."
-            exit 1
-        fi
+    log_debug "Mirroring ${TARGET}:${REMOTE_SNAP} into ${LOCAL_DATASET}"
 
-        ssh ${USER}@${TARGET} "zfs send -c -I ${REMOTE_DATASET}@${LAST_LOCAL_SNAP_TAG} ${LAST_TARGET_SNAP} | gzip" | gzip -d | zfs recv -F -v ${LOCAL_DATASET} && return 0 || log_error "Failed to send incremental snapshot"
-    done
+    ssh ${TARGET} "zfs send -c ${REMOTE_SNAP} | gzip" | gzip -d | zfs recv -F -v ${LOCAL_DATASET}
+    return $?
+}
 
-    if [ ${PANIC} -eq 1 ]; then
-        log_warning "Panicing and sending entire dataset"
-        PANIC_SNAP="${REMOTE_DATASET}@zfs-auto-backup_panic-$(date -u +%F-%H%M)"
-        ssh ${USER}@${TARGET} "zfs snapshot ${PANIC_SNAP}" || (log_error "Failed while panicing, aborting" && exit 1)
-        ssh ${USER}@${TARGET} "zfs send -c ${PANIC_SNAP} | gzip" | gzip -d | zfs recv -F -v ${LOCAL_DATASET} && log_info "Panic succeeded" && return 0
+# do_backup target remote_dataset local_dataset
+# target - user@host
+# remote_dataset - dataset to mirror
+# local_dataset - mirrored dataset
+mirror() {
+    local TARGET=$1
+    local REMOTE_DATASET=$2
+    local LOCAL_DATASET=$3
+
+    # local and remote snapshots are sorted by creation date
+    LOCAL_SNAPSHOTS=$(zfs list -t snapshot -H -S creation -o name ${LOCAL_DATASET} | cut -d "@" -f2-)
+    REMOTE_SNAPSHOTS=$(ssh ${TARGET} "zfs list -t snapshot -H -S creation -o name ${REMOTE_DATASET}" | cut -d "@" -f2-)
+    LAST_LOCAL_SNAPSHOT=$(echo ${LOCAL_SNAPSHOTS} | head -n1 | awk '{print $1;}')
+    LAST_REMOTE_SNAPSHOT=$(echo ${REMOTE_SNAPSHOTS} | head -n1 | awk '{print $1;}')
+
+    log_debug "Local snapshots: ${LOCAL_SNAPSHOTS}"
+    log_debug "Remote snapshots: ${REMOTE_SNAPSHOTS}"
+
+    # if remote dataset does not exist, there is nothing to do
+    if [ -z "$(ssh ${TARGET} "zfs list -H -o name | grep ${REMOTE_DATASET}")" ]; then
+        log_error "Remote dataset \"${REMOTE_DATASET}\" does not exist"
+        return 1
     fi
 
-    log_debug "failed to mirror dataset, aborting" && exit 1
+    # if local dataset does not exist, do a full sync
+    if [ -z "$(zfs list -H -o name | grep ${LOCAL_DATASET})" ]; then
+        log_error "Local dataset \"${LOCAL_DATASET}\" does not exist, starting full sync"
+        send_full_sync ${TARGET} ${REMOTE_DATASET}@${LAST_REMOTE_SNAPSHOT} ${LOCAL_DATASET}
+        return $?
+    fi
+
+    # if there are no local snpashots we cannot do an incremental
+    if [ -z "${LOCAL_SNAPSHOTS}" ]; then
+        log_info "No local snapshots, starting full sync"
+        send_full_sync ${TARGET} ${REMOTE_DATASET}@${LAST_REMOTE_SNAPSHOT} ${LOCAL_DATASET}
+        return $?
+    fi
+
+    if [ "${LAST_LOCAL_SNAPSHOT}" = "${LAST_REMOTE_SNAPSHOT}" ]; then
+        log_info "Datasets are up-to-date, done"
+        return 0
+    fi
+
+    # try to find an incremental backup
+    for LOCAL_SNAP in ${LOCAL_SNAPSHOTS}; do
+        # if the current snapshot does not exist on the remote, we can't do an incremental with it
+        if [ -z "$(echo ${REMOTE_SNAPSHOTS} | grep ${LOCAL_SNAP})" ]; then
+            log_info "Snapshot ${LOCAL_SNAP} not found in remote, skipping"
+            continue
+        fi 
+
+        for REMOTE_SNAP in ${REMOTE_SNAPSHOTS}; do
+            if [ "${LOCAL_SNAP}" = "${REMOTE_SNAP}" ]; then
+                log_info "Comparing the same snapshot (${LOCAL_SNAP}), done"
+                return 0
+            fi
+
+            log_debug "Current diff: from ${LOCAL_SNAP} to ${REMOTE_SNAP}"
+            send_incremental ${TARGET} ${REMOTE_DATASET}@${LOCAL_SNAP} ${REMOTE_DATASET}@${REMOTE_SNAP} ${LOCAL_DATASET} && return 0
+        done
+    done
+
+    log_info "failed to find valid incremental sync"
 }
 
 main() {
-    USER=$1
-    TARGET=$2
-    REMOTE_DATASET=$3
-    LOCAL_DATASET=$4
+    local TARGET=$1
+    local REMOTE_DATASET=$2
+    local LOCAL_DATASET=$3
 
-    do_backup ${USER} ${TARGET} ${REMOTE_DATASET} ${LOCAL_DATASET}
+    mirror ${TARGET} ${REMOTE_DATASET} ${LOCAL_DATASET}
+    return $?
 }
 
 main $*
