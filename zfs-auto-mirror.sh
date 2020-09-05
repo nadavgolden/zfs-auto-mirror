@@ -7,6 +7,7 @@ LOG_ERROR=4
 
 LOG_LEVEL=${LOG_WARNING}
 FORCE_MIRROR=0
+LABEL="daily"
 
 log_debug() {
     if [ ${LOG_LEVEL} -le ${LOG_DEBUG} ] ; then
@@ -42,8 +43,6 @@ send_incremental() {
     log_debug "Sending incremental backup from ${SNAP1} to ${SNAP2}"
 
     ssh ${TARGET} "zfs send -c -i ${SNAP1} ${SNAP2} | gzip" | gzip -d | zfs recv -F -v ${LOCAL_DATASET}
-    # echo "ssh ${TARGET} zfs send -c -I ${SNAP1} ${SNAP2} | gzip \| gzip -d \| zfs recv -F -v ${LOCAL_DATASET}" && return 0
-    # did not work
     return $?
 }
 
@@ -69,8 +68,8 @@ mirror() {
     local LOCAL_DATASET=$3
 
     # local and remote snapshots are sorted by creation date
-    LOCAL_SNAPSHOTS=$(zfs list -t snapshot -H -S creation -o name ${LOCAL_DATASET} | cut -d "@" -f2-)
-    REMOTE_SNAPSHOTS=$(ssh ${TARGET} "zfs list -t snapshot -H -S creation -o name ${REMOTE_DATASET}" | cut -d "@" -f2-)
+    LOCAL_SNAPSHOTS=$(zfs list -t snapshot -H -S creation -o name ${LOCAL_DATASET} | grep ${LABEL} | cut -d "@" -f2-)
+    REMOTE_SNAPSHOTS=$(ssh ${TARGET} "zfs list -t snapshot -H -S creation -o name ${REMOTE_DATASET}" | grep ${LABEL} | cut -d "@" -f2-)
     LAST_LOCAL_SNAPSHOT=$(echo ${LOCAL_SNAPSHOTS} | head -n1 | awk '{print $1;}')
     LAST_REMOTE_SNAPSHOT=$(echo ${REMOTE_SNAPSHOTS} | head -n1 | awk '{print $1;}')
 
@@ -112,7 +111,7 @@ mirror() {
     for LOCAL_SNAP in ${LOCAL_SNAPSHOTS}; do
         # if the current snapshot does not exist on the remote, we can't do an incremental with it
         if [ -z "$(echo ${REMOTE_SNAPSHOTS} | grep ${LOCAL_SNAP})" ]; then
-            log_info "Snapshot ${LOCAL_SNAP} not found in remote, skipping"
+            log_warning "Snapshot ${LOCAL_SNAP} not found in remote, skipping"
             continue
         fi 
 
@@ -140,17 +139,18 @@ mirror() {
 print_usage() {
     echo "Usage: $0 [options] target remote_dataset local_dataset
   options:
-    -d N  Print N-th log level (1=DEBUG, 2=INFO, 3=WARNING, 4=ERROR)
-    -f    Force full sync if conflict is detected between local and remote snapshots
+    -f          Force full sync if conflict is detected between local and remote snapshots
+    -d N        Print N-th log level (1=DEBUG, 2=INFO, 3=WARNING, 4=ERROR)
+    -l,--label  Filter this label from snapshots (default: daily)
   
   positional:
     target          user@remote, used for SSH
-    remote_dataset  The dataset to mirror from
-    local_dataset   The dataset to mirror into"
+    local_dataset   The dataset to mirror into
+    remote_dataset  The dataset to mirror from"
 }
 
 main() {
-    GETOPT=$(getopt -o=fd: -- $@) || exit 1
+    GETOPT=$(getopt -o=fd:l: -l=label: -- $@) || exit 1
     eval set -- "${GETOPT}"
 
     while [ "$#" -gt 0 ]; do
@@ -158,6 +158,10 @@ main() {
             (-f)
                 FORCE_MIRROR=1
                 shift 1
+                ;;
+            (-l|--label)
+                LABEL=$2
+                shift 2
                 ;;
             (-d)
                 LOG_LEVEL=$2

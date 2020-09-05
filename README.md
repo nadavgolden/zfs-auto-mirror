@@ -1,23 +1,40 @@
 # zfs-auto-mirror
-The script compares the local and the remote snapshots, and tries to transfer incremental updates. 
+The script compares the local and the remote snapshots, and tries to transfer incremental updates. Can be used as a companion app to [`zfs-auto-snapshot`](https://github.com/zfsonlinux/zfs-auto-snapshot).
 
 ## Install
 ```
-# git clone 
+# git clone https://github.com/nadavgolden/zfs-auto-mirror.git
 # cd zfs-auto-mirror
 # sudo make install
 ```
 
 ## Usage
 ```
-Usage: zfs-auto-mirror target remote_dataset local_dataset
-
-      target          user@host of server to mirror
-      remote_dataset  Name of the dataset to mirror from
-      local_dataset   Name of the dataset to mirror to
+Usage: zfs-auto-snapshot [options] target remote_dataset local_dataset
+  options:
+    -f          Force full sync if conflict is detected between local and remote snapshots
+    -d N        Print N-th log level (1=DEBUG, 2=INFO, 3=WARNING, 4=ERROR)
+    -l,--label  Filter this label from snapshots (default: daily)
+  
+  positional:
+    target          user@remote, used for SSH
+    local_dataset   The dataset to mirror into
+    remote_dataset  The dataset to mirror from
 ```
+
+## Prerequisites
+1. ZFS installed (duh).
+2. User on remote should be allowed to:
+    ```
+    # zfs allow <user> send,hold <dataset>
+    ```
+3. User on mirror (local machine) should be allowed to:
+    ```
+    # zfs allow <user> create,destroy,mount,receive <dataset>
+    ```
+4. SSH to remote with public key authentication so that SSH would not prompt for password.
 
 ## Notes
 Notes about the script:
-- It runs **on the mirror** - it pulls changes from the main server.
+- It runs **on the mirror** - it pulls changes from the main server. This is by design.
 - It does not remove snapshots which has been deleted on the main server. Currently it keeps them forever.
