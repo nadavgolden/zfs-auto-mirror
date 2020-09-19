@@ -45,9 +45,9 @@ send_incremental() {
     log_info "Sending incremental backup from ${SNAP1} to ${SNAP2}"
 
     if [ ${PROGRESS} -eq 1 ]; then
-        ssh ${TARGET} "zfs send -c -i ${SNAP1} ${SNAP2}" | pv | zfs recv -F -v ${LOCAL_DATASET}
+        ssh ${TARGET} "zfs send -c -i ${SNAP1} ${SNAP2}" | pv | zfs recv -F -s -v ${LOCAL_DATASET}
     elif [ ${PROGRESS} -eq 0 ]; then
-        ssh ${TARGET} "zfs send -c -i ${SNAP1} ${SNAP2}" | zfs recv -F -v ${LOCAL_DATASET}
+        ssh ${TARGET} "zfs send -c -i ${SNAP1} ${SNAP2}" | zfs recv -F -s -v ${LOCAL_DATASET}
     else
         log_error "Invalid progress value" && return 1
     fi
@@ -63,13 +63,29 @@ send_full_sync() {
     log_info "Mirroring ${TARGET}:${REMOTE_SNAP} into ${LOCAL_DATASET}"
 
     if [ ${PROGRESS} -eq 1 ]; then
-        ssh ${TARGET} "zfs send -c ${REMOTE_SNAP}" | pv | zfs recv -F -v ${LOCAL_DATASET}
+        ssh ${TARGET} "zfs send -c ${REMOTE_SNAP}" | pv | zfs recv -F -s ${LOCAL_DATASET}
     elif [ ${PROGRESS} -eq 0 ]; then
-        ssh ${TARGET} "zfs send -c ${REMOTE_SNAP}" | zfs recv -F -v ${LOCAL_DATASET}
+        ssh ${TARGET} "zfs send -c ${REMOTE_SNAP}" | zfs recv -F -s ${LOCAL_DATASET}
     else
         log_error "Invalid progress value" && return 1
     fi
     return $?
+}
+
+# resume_sync target local_dataset token
+resume_sync() {
+    local TARGET=$1
+    local LOCAL_DATASET=$2
+    local TOKEN=$3
+
+    if [ ${PROGRESS} -eq 1 ]; then
+        ssh ${TARGET} "zfs send -c -t ${TOKEN}" | pv | zfs recv -F -s ${LOCAL_DATASET}
+    elif [ ${PROGRESS} -eq 0 ]; then
+        ssh ${TARGET} "zfs send -c -t ${TOKEN}" | zfs recv -F -s ${LOCAL_DATASET}
+    else
+        log_error "Invalid progress value" && return 1
+    fi
+    
 }
 
 # mirror target remote_dataset local_dataset
@@ -80,21 +96,17 @@ mirror() {
     local TARGET=$1
     local REMOTE_DATASET=$2
     local LOCAL_DATASET=$3
-
-    # local and remote snapshots are sorted by creation date
-    LOCAL_SNAPSHOTS=$(zfs list -t snapshot -H -S creation -o name ${LOCAL_DATASET} | grep ${LABEL} | cut -d "@" -f2-)
-    REMOTE_SNAPSHOTS=$(ssh ${TARGET} "zfs list -t snapshot -H -S creation -o name ${REMOTE_DATASET}" | grep ${LABEL} | cut -d "@" -f2-)
-    LAST_LOCAL_SNAPSHOT=$(echo ${LOCAL_SNAPSHOTS} | head -n1 | awk '{print $1;}')
-    LAST_REMOTE_SNAPSHOT=$(echo ${REMOTE_SNAPSHOTS} | head -n1 | awk '{print $1;}')
-
-    log_debug "Local snapshots: ${LOCAL_SNAPSHOTS}"
-    log_debug "Remote snapshots: ${REMOTE_SNAPSHOTS}"
-
+    
     # if remote dataset does not exist, there is nothing to do
     if [ -z "$(ssh ${TARGET} "zfs list -H -o name | grep ${REMOTE_DATASET}")" ]; then
         log_error "Remote dataset \"${REMOTE_DATASET}\" does not exist"
         return 1
     fi
+
+    REMOTE_SNAPSHOTS=$(ssh ${TARGET} "zfs list -t snapshot -H -S creation -o name ${REMOTE_DATASET}" | grep ${LABEL} | cut -d "@" -f2-)
+    LAST_REMOTE_SNAPSHOT=$(echo ${REMOTE_SNAPSHOTS} | head -n1 | awk '{print $1;}')
+
+    log_debug "Remote snapshots: ${REMOTE_SNAPSHOTS}"
 
     # if remote dataset has no snapshots, there is nothing to backup
     if [ -z "${REMOTE_SNAPSHOTS}" ]; then
@@ -108,6 +120,19 @@ mirror() {
         send_full_sync ${TARGET} ${REMOTE_DATASET}@${LAST_REMOTE_SNAPSHOT} ${LOCAL_DATASET}
         return $?
     fi
+
+    # if there is a resume token, continue last sync
+    TOKEN=$(zfs get -H -o value receive_resume_token ${LOCAL_DATASET})
+
+    if [ "${TOKEN}" != "-" ]; then
+        log_info "Resuming previously interrupted sync"
+        resume_sync ${TARGET} ${LOCAL_DATASET} ${TOKEN}
+    fi
+
+    LOCAL_SNAPSHOTS=$(zfs list -t snapshot -H -S creation -o name ${LOCAL_DATASET} | grep ${LABEL} | cut -d "@" -f2-)
+    LAST_LOCAL_SNAPSHOT=$(echo ${LOCAL_SNAPSHOTS} | head -n1 | awk '{print $1;}')
+
+    log_debug "Local snapshots: ${LOCAL_SNAPSHOTS}"
 
     # if there are no local snpashots we cannot do an incremental
     if [ -z "${LOCAL_SNAPSHOTS}" ]; then
