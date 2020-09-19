@@ -5,9 +5,11 @@ LOG_INFO=2
 LOG_WARNING=3
 LOG_ERROR=4
 
+# Default values
 LOG_LEVEL=${LOG_WARNING}
 FORCE_MIRROR=0
 LABEL="daily"
+PROGRESS=0
 
 log_debug() {
     if [ ${LOG_LEVEL} -le ${LOG_DEBUG} ] ; then
@@ -40,9 +42,15 @@ send_incremental() {
     local SNAP2=$3
     local LOCAL_DATASET=$4
 
-    log_debug "Sending incremental backup from ${SNAP1} to ${SNAP2}"
+    log_info "Sending incremental backup from ${SNAP1} to ${SNAP2}"
 
-    ssh ${TARGET} "zfs send -c -i ${SNAP1} ${SNAP2} | gzip" | gzip -d | zfs recv -F -v ${LOCAL_DATASET}
+    if [ ${PROGRESS} -eq 1 ]; then
+        ssh ${TARGET} "zfs send -c -i ${SNAP1} ${SNAP2}" | pv | zfs recv -F -v ${LOCAL_DATASET}
+    elif [ ${PROGRESS} -eq 0 ]; then
+        ssh ${TARGET} "zfs send -c -i ${SNAP1} ${SNAP2}" | zfs recv -F -v ${LOCAL_DATASET}
+    else
+        log_error "Invalid progress value" && return 1
+    fi
     return $?
 }
 
@@ -52,9 +60,15 @@ send_full_sync() {
     local REMOTE_SNAP=$2
     local LOCAL_DATASET=$3
 
-    log_debug "Mirroring ${TARGET}:${REMOTE_SNAP} into ${LOCAL_DATASET}"
+    log_info "Mirroring ${TARGET}:${REMOTE_SNAP} into ${LOCAL_DATASET}"
 
-    ssh ${TARGET} "zfs send -c ${REMOTE_SNAP} | gzip" | gzip -d | zfs recv -F -v ${LOCAL_DATASET}
+    if [ ${PROGRESS} -eq 1 ]; then
+        ssh ${TARGET} "zfs send -c ${REMOTE_SNAP}" | pv | zfs recv -F -v ${LOCAL_DATASET}
+    elif [ ${PROGRESS} -eq 0 ]; then
+        ssh ${TARGET} "zfs send -c ${REMOTE_SNAP}" | zfs recv -F -v ${LOCAL_DATASET}
+    else
+        log_error "Invalid progress value" && return 1
+    fi
     return $?
 }
 
@@ -139,9 +153,12 @@ mirror() {
 print_usage() {
     echo "Usage: $0 [options] target remote_dataset local_dataset
   options:
-    -f          Force full sync if conflict is detected between local and remote snapshots
-    -d N        Print N-th log level (1=DEBUG, 2=INFO, 3=WARNING, 4=ERROR)
-    -l,--label  Filter this label from snapshots (default: daily)
+    -f             Force full sync if conflict is detected between local and remote snapshots
+    -d N           Print N-th log level (1=DEBUG, 2=INFO, 3=WARNING, 4=ERROR)
+
+    -h,--help      Print this usage message
+    -l,--label     Filter this label from snapshots (default: daily)
+    -p,--progress  Display data transfer information. 'pv' installation required
   
   positional:
     target          user@remote, used for SSH
@@ -150,9 +167,9 @@ print_usage() {
 }
 
 main() {
-    GETOPT=$(getopt -o=fd:l: -l=label: -- $@) || exit 1
+    GETOPT=$(getopt -o=fhpd:l: -l=label:,progress,help -- $@) || exit 1
     eval set -- "${GETOPT}"
-
+    
     while [ "$#" -gt 0 ]; do
         case "$1" in
             (-f)
@@ -167,7 +184,11 @@ main() {
                 LOG_LEVEL=$2
                 shift 2
                 ;;
-            (-h)
+            (-p|--progress)
+                PROGRESS=1
+                shift 1
+                ;;
+            (-h|--help)
                 print_usage
                 exit 0
                 ;;

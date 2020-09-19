@@ -8,9 +8,14 @@ The script compares the local and the remote snapshots, and tries to transfer in
 # sudo make install
 ```
 
+\* **Note**: for the `--progress` option to work, `pv` should be installed, e.g.:
+```
+# sudo apt install pv
+```
+
 ## Usage
 ```
-Usage: zfs-auto-snapshot [options] target remote_dataset local_dataset
+Usage: zfs-auto-mirror [options] target remote_dataset local_dataset
   options:
     -f          Force full sync if conflict is detected between local and remote snapshots
     -d N        Print N-th log level (1=DEBUG, 2=INFO, 3=WARNING, 4=ERROR)
