@@ -45,7 +45,9 @@ send_incremental() {
     log_info "Sending incremental backup from ${SNAP1} to ${SNAP2}"
 
     if [ ${PROGRESS} -eq 1 ]; then
-        ssh ${TARGET} "zfs send -c -i ${SNAP1} ${SNAP2}" | pv | zfs recv -F -s -v ${LOCAL_DATASET}
+        ESTIMATED_SIZE=$(ssh ${TARGET} "zfs send -n -P -i ${SNAP1} ${SNAP2}" | grep size | awk '{print $2}')
+        log_info "Estimated data trasfer: ${ESTIMATED_SIZE}"
+        ssh ${TARGET} "zfs send -c -i ${SNAP1} ${SNAP2}" | pv -s "${ESTIMATED_SIZE}" | zfs recv -F -s -v ${LOCAL_DATASET}
     elif [ ${PROGRESS} -eq 0 ]; then
         ssh ${TARGET} "zfs send -c -i ${SNAP1} ${SNAP2}" | zfs recv -F -s -v ${LOCAL_DATASET}
     else
@@ -63,7 +65,9 @@ send_full_sync() {
     log_info "Mirroring ${TARGET}:${REMOTE_SNAP} into ${LOCAL_DATASET}"
 
     if [ ${PROGRESS} -eq 1 ]; then
-        ssh ${TARGET} "zfs send -c ${REMOTE_SNAP}" | pv | zfs recv -F -s ${LOCAL_DATASET}
+        ESTIMATED_SIZE=$(ssh ${TARGET} "zfs send -n -P ${REMOTE_SNAP}" | grep size | awk '{print $2}')
+        log_info "Estimated data trasfer: ${ESTIMATED_SIZE}"
+        ssh ${TARGET} "zfs send -c ${REMOTE_SNAP}" | pv -s "${ESTIMATED_SIZE}" | zfs recv -F -s ${LOCAL_DATASET}
     elif [ ${PROGRESS} -eq 0 ]; then
         ssh ${TARGET} "zfs send -c ${REMOTE_SNAP}" | zfs recv -F -s ${LOCAL_DATASET}
     else
@@ -79,13 +83,16 @@ resume_sync() {
     local TOKEN=$3
 
     if [ ${PROGRESS} -eq 1 ]; then
-        ssh ${TARGET} "zfs send -c -t ${TOKEN}" | pv | zfs recv -F -s ${LOCAL_DATASET}
+        ESTIMATED_SIZE=$(ssh ${TARGET} "zfs send -n -P -t ${TOKEN}" | grep full | awk '{print $3}')
+        log_info "Estimated data trasfer: ${ESTIMATED_SIZE}"
+        ssh ${TARGET} "zfs send -c -t ${TOKEN}" | pv -s "${ESTIMATED_SIZE}" | zfs recv -F -s ${LOCAL_DATASET}
     elif [ ${PROGRESS} -eq 0 ]; then
         ssh ${TARGET} "zfs send -c -t ${TOKEN}" | zfs recv -F -s ${LOCAL_DATASET}
     else
         log_error "Invalid progress value" && return 1
     fi
     
+    return $?
 }
 
 # mirror target remote_dataset local_dataset
