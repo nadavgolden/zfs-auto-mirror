@@ -10,6 +10,8 @@ LOG_LEVEL=${LOG_WARNING}
 FORCE_MIRROR=0
 LABEL="daily"
 PROGRESS=0
+DESTROY_THRESHOLD=30
+DESTROY_OLD_SNAPS=0
 
 log_debug() {
     if [ ${LOG_LEVEL} -le ${LOG_DEBUG} ] ; then
@@ -182,15 +184,54 @@ mirror() {
 
 }
 
+# destroy_old_snaps dataset
+destroy_old_snaps() {
+    local DATASET=$1
+
+    if [ "${DESTROY_THRESHOLD}" -lt 0 ]; then
+        log_error "Invalid destroy threshold ${DESTROY_THRESHOLD}"
+        return 1
+    fi
+
+    if [ -z "$(zfs list -H -o name | grep ${DATASET})" ]; then
+        log_error "Dataset ${DATASET} does not exist"
+        return 1
+    fi
+
+    THRESHOLD=$(date -d "now - ${DESTROY_THRESHOLD} days" "+%s")
+    log_debug "Threshold: ${DESTROY_THRESHOLD} days (${THRESHOLD})"
+
+    zfs list -H -s creation -o name,creation -t snapshot ${DATASET} | 
+    while read -r SNAP; do
+        NAME=$(echo ${SNAP} | cut -d " " -f1)
+        DATE=$(echo ${SNAP} | cut -d " " -f2- | date "+%s" -f -)
+        
+        log_debug "Name: ${NAME}, Date: ${DATE}"
+
+        if [ "${DATE}" -lt "${THRESHOLD}" ]; then
+            zfs destroy ${NAME} 
+            
+            if [ $? -ne 0 ]; then
+                log_error "Failed to destroy snapshot ${NAME}"
+                continue
+            fi
+
+            log_info "Destroyed ${NAME}"
+        fi
+    done
+}
+
+
 print_usage() {
     echo "Usage: $0 [options] target remote_dataset local_dataset
   options:
     -f             Force full sync if conflict is detected between local and remote snapshots
     -d N           Print N-th log level (1=DEBUG, 2=INFO, 3=WARNING, 4=ERROR)
 
-    -h,--help      Print this usage message
-    -l,--label     Filter this label from snapshots (default: daily)
-    -p,--progress  Display data transfer information. 'pv' installation required
+    -h, --help           Print this usage message
+    -l, --label          Filter this label from snapshots (default: daily)
+    -p, --progress       Display data transfer information. 'pv' installation required
+    -D, --destroy=DAYS   Destroy snapshots taken up to DAYS days ago
   
   positional:
     target          user@remote, used for SSH
@@ -199,7 +240,7 @@ print_usage() {
 }
 
 main() {
-    GETOPT=$(getopt -o=fhpd:l: -l=label:,progress,help -- $@) || exit 1
+    GETOPT=$(getopt -o=fhpd:l:D: -l=label:,progress,help,destroy: -- $@) || exit 1
     eval set -- "${GETOPT}"
     
     while [ "$#" -gt 0 ]; do
@@ -219,6 +260,19 @@ main() {
             (-p|--progress)
                 PROGRESS=1
                 shift 1
+                ;;
+            (-D|--destroy)
+                # valid values: 0-9999 (days); up to ~ 27 years, 8 months back
+                local NUMBER_RE="^[0-9]{,4}$"
+                local VALUE=$2
+                echo "${VALUE}" | grep -Eq ${NUMBER_RE}
+                if [ $? -ne 0 ]; then
+                    log_error "Invalid threshold \"$2\"; Valid values: 0-9999"
+                    return 1
+                fi
+                DESTROY_THRESHOLD=${VALUE}
+                DESTROY_OLD_SNAPS=1
+                shift 2
                 ;;
             (-h|--help)
                 print_usage
@@ -242,7 +296,18 @@ main() {
     local LOCAL_DATASET=$3
 
     mirror ${TARGET} ${REMOTE_DATASET} ${LOCAL_DATASET}
-    return $?
+
+    if [ $? -ne 0 ]; then
+        return $?
+    fi
+
+    if [ "${DESTROY_OLD_SNAPS}" -eq 1 ]; then
+        log_info "Destroying old snapshots"
+        destroy_old_snaps ${LOCAL_DATASET}
+    fi
+
+    return 0
 }
 
 main $*
+return $?
