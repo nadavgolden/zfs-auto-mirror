@@ -20,9 +20,10 @@ Usage: zfs-auto-mirror [options] target remote_dataset local_dataset
     -f             Force full sync if conflict is detected between local and remote snapshots
     -d N           Print N-th log level (1=DEBUG, 2=INFO, 3=WARNING, 4=ERROR)
 
-    -h,--help      Print this usage message
-    -l,--label     Filter this label from snapshots (default: daily)
-    -p,--progress  Display data transfer information. 'pv' installation required
+    -h, --help           Print this usage message
+    -l, --label          Filter this label from snapshots (default: daily)
+    -p, --progress       Display data transfer information. 'pv' installation required
+    -D, --destroy=DAYS   Destroy snapshots taken up to DAYS days ago
   
   positional:
     target          user@remote, used for SSH
@@ -45,4 +46,4 @@ Usage: zfs-auto-mirror [options] target remote_dataset local_dataset
 ## Notes
 Notes about the script:
 - It runs **on the mirror** - it pulls changes from the main server. This is by design.
-- It does not remove snapshots which has been deleted on the main server. Currently it keeps them forever.
+- It does not remove snapshots which has been deleted on the main server.
