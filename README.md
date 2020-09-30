@@ -2,15 +2,15 @@
 The script compares the local and the remote snapshots, and tries to transfer incremental updates. Can be used as a companion app to [`zfs-auto-snapshot`](https://github.com/zfsonlinux/zfs-auto-snapshot).
 
 ## Install
-```
-# git clone https://github.com/nadavgolden/zfs-auto-mirror.git
-# cd zfs-auto-mirror
-# sudo make install
+```bash
+git clone https://github.com/nadavgolden/zfs-auto-mirror.git
+cd zfs-auto-mirror
+sudo make install
 ```
 
 \* **Note**: for the `--progress` option to work, `pv` should be installed, e.g.:
-```
-# sudo apt install pv
+```bash
+sudo apt install pv
 ```
 
 ## Usage
@@ -33,12 +33,12 @@ Usage: zfs-auto-mirror [options] target remote_dataset local_dataset
 ## Prerequisites
 1. ZFS installed (duh).
 2. User on remote should be allowed to:
-    ```
-    # zfs allow <user> send,hold <dataset>
+    ```bash
+    zfs allow <user> send,hold <dataset>
     ```
 3. User on mirror (local machine) should be allowed to:
-    ```
-    # zfs allow <user> create,destroy,mount,receive <dataset>
+    ```bash
+    zfs allow <user> create,destroy,mount,receive <dataset>
     ```
 4. SSH to remote with public key authentication so that SSH would not prompt for password.
 
