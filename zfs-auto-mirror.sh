@@ -8,7 +8,7 @@ LOG_ERROR=4
 # Default values
 LOG_LEVEL=${LOG_WARNING}
 FORCE_MIRROR=0
-LABEL="daily"
+LABEL="zfs-auto-mirror"
 PROGRESS=0
 DESTROY_THRESHOLD=30
 DESTROY_OLD_SNAPS=0
@@ -97,6 +97,15 @@ resume_sync() {
     return $?
 }
 
+create_remote_snapshot() {
+    local TARGET=$1
+    local REMOTE_DATASET=$2
+    local SNAPSHOT=$3
+
+    ssh ${TARGET} "zfs snapshot ${REMOTE_DATASET}@${SNAPSHOT}"
+    return $?
+}
+
 # mirror target remote_dataset local_dataset
 # target - user@host
 # remote_dataset - dataset to mirror from
@@ -112,16 +121,21 @@ mirror() {
         return 1
     fi
 
+    # create a snapshot
+    NEW_SNAPSHOT_NAME=zfs-auto-mirror_$(date -u +%F-%H%M)
+    log_info "Remote dataset \"${REMOTE_DATASET}\" has no snapshots. Creating \"${NEW_SNAPSHOT_NAME}\"."
+    create_remote_snapshot ${TARGET} ${REMOTE_DATASET} ${NEW_SNAPSHOT_NAME}
+    
+    if [ $? -ne 0 ]; then
+        log_error "Failed to create snapshot."
+        return $?
+    fi
+
+    # refresh remote snapshot list
     REMOTE_SNAPSHOTS=$(ssh ${TARGET} "zfs list -t snapshot -H -S creation -o name ${REMOTE_DATASET}" | grep ${LABEL} | cut -d "@" -f2-)
     LAST_REMOTE_SNAPSHOT=$(echo ${REMOTE_SNAPSHOTS} | head -n1 | awk '{print $1;}')
-
-    log_debug "Remote snapshots: ${REMOTE_SNAPSHOTS}"
-
-    # if remote dataset has no snapshots, there is nothing to backup
-    if [ -z "${REMOTE_SNAPSHOTS}" ]; then
-        log_error "Remote dataset \"${REMOTE_DATASET}\" has no snapshots"
-        return 1
-    fi
+        log_debug "Remote snapshots: ${REMOTE_SNAPSHOTS}"
+    # fi
 
     # if local dataset does not exist, do a full sync
     if [ -z "$(zfs list -H -o name | grep ${LOCAL_DATASET})" ]; then
