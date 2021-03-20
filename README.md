@@ -1,5 +1,5 @@
 # zfs-auto-mirror
-The script compares the local and the remote snapshots, and tries to transfer incremental updates. Can be used as a companion app to [`zfs-auto-snapshot`](https://github.com/zfsonlinux/zfs-auto-snapshot).
+Mirror a ZFS filesystem from a remote server using incremental transfers.
 
 ## Install
 ```
@@ -21,7 +21,7 @@ Usage: zfs-auto-mirror [options] target remote_dataset local_dataset
     -d N           Print N-th log level (1=DEBUG, 2=INFO, 3=WARNING, 4=ERROR)
 
     -h, --help           Print this usage message
-    -l, --label          Filter this label from snapshots (default: daily)
+    -l, --label          Filter this label from snapshots (default: zfs-auto-mirror)
     -p, --progress       Display data transfer information. 'pv' installation required
     -D, --destroy=DAYS   Destroy snapshots taken up to DAYS days ago
   
