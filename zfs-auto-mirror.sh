@@ -8,7 +8,7 @@ LOG_ERROR=4
 # Default values
 LOG_LEVEL=${LOG_WARNING}
 FORCE_MIRROR=0
-LABEL="daily"
+LABEL="zfs-auto-mirror"
 PROGRESS=0
 DESTROY_THRESHOLD=30
 DESTROY_OLD_SNAPS=0
@@ -85,7 +85,7 @@ resume_sync() {
     local TOKEN=$3
 
     if [ ${PROGRESS} -eq 1 ]; then
-        ESTIMATED_SIZE=$(ssh ${TARGET} "zfs send -n -P -t ${TOKEN}" | grep full | awk '{print $3}')
+        ESTIMATED_SIZE=$(ssh ${TARGET} "zfs send -n -P -t ${TOKEN}" | grep size | awk '{print $2}')
         log_info "Estimated data trasfer: ${ESTIMATED_SIZE}"
         ssh ${TARGET} "zfs send -c -t ${TOKEN}" | pv -s "${ESTIMATED_SIZE}" | zfs recv -F -s ${LOCAL_DATASET}
     elif [ ${PROGRESS} -eq 0 ]; then
@@ -94,6 +94,15 @@ resume_sync() {
         log_error "Invalid progress value" && return 1
     fi
     
+    return $?
+}
+
+create_remote_snapshot() {
+    local TARGET=$1
+    local REMOTE_DATASET=$2
+    local SNAPSHOT=$3
+
+    ssh ${TARGET} "zfs snapshot ${REMOTE_DATASET}@${SNAPSHOT}"
     return $?
 }
 
@@ -112,24 +121,6 @@ mirror() {
         return 1
     fi
 
-    REMOTE_SNAPSHOTS=$(ssh ${TARGET} "zfs list -t snapshot -H -S creation -o name ${REMOTE_DATASET}" | grep ${LABEL} | cut -d "@" -f2-)
-    LAST_REMOTE_SNAPSHOT=$(echo ${REMOTE_SNAPSHOTS} | head -n1 | awk '{print $1;}')
-
-    log_debug "Remote snapshots: ${REMOTE_SNAPSHOTS}"
-
-    # if remote dataset has no snapshots, there is nothing to backup
-    if [ -z "${REMOTE_SNAPSHOTS}" ]; then
-        log_error "Remote dataset \"${REMOTE_DATASET}\" has no snapshots"
-        return 1
-    fi
-
-    # if local dataset does not exist, do a full sync
-    if [ -z "$(zfs list -H -o name | grep ${LOCAL_DATASET})" ]; then
-        log_error "Local dataset \"${LOCAL_DATASET}\" does not exist, starting full sync"
-        send_full_sync ${TARGET} ${REMOTE_DATASET}@${LAST_REMOTE_SNAPSHOT} ${LOCAL_DATASET}
-        return $?
-    fi
-
     # if there is a resume token, continue last sync
     TOKEN=$(zfs get -H -o value receive_resume_token ${LOCAL_DATASET})
 
@@ -138,7 +129,28 @@ mirror() {
         resume_sync ${TARGET} ${LOCAL_DATASET} ${TOKEN}
     fi
 
-    LOCAL_SNAPSHOTS=$(zfs list -t snapshot -H -S creation -o name ${LOCAL_DATASET} | grep ${LABEL} | cut -d "@" -f2-)
+    # create a snapshot
+    NEW_SNAPSHOT_NAME=zfs-auto-mirror_$(date -u +%F-%H%M)
+    log_info "Creating \"${REMOTE_DATASET}@${NEW_SNAPSHOT_NAME}\""
+    create_remote_snapshot ${TARGET} ${REMOTE_DATASET} ${NEW_SNAPSHOT_NAME}
+    
+    if [ $? -ne 0 ]; then
+        log_error "Failed to create snapshot."
+        return $?
+    fi
+
+    REMOTE_SNAPSHOTS=$(ssh ${TARGET} "zfs list -t snapshot -H -o name ${REMOTE_DATASET}" | grep ${LABEL} | sort -r | cut -d "@" -f2-)
+    LAST_REMOTE_SNAPSHOT=$(echo ${REMOTE_SNAPSHOTS} | head -n1 | awk '{print $1;}')
+    log_debug "Remote snapshots: ${REMOTE_SNAPSHOTS}"
+
+    # if local dataset does not exist, do a full sync
+    if [ -z "$(zfs list -H -o name | grep ${LOCAL_DATASET})" ]; then
+        log_error "Local dataset \"${LOCAL_DATASET}\" does not exist, starting full sync"
+        send_full_sync ${TARGET} ${REMOTE_DATASET}@${LAST_REMOTE_SNAPSHOT} ${LOCAL_DATASET}
+        return $?
+    fi
+
+    LOCAL_SNAPSHOTS=$(zfs list -t snapshot -H -o name ${LOCAL_DATASET} | grep ${LABEL} | sort -r | cut -d "@" -f2-)
     LAST_LOCAL_SNAPSHOT=$(echo ${LOCAL_SNAPSHOTS} | head -n1 | awk '{print $1;}')
 
     log_debug "Local snapshots: ${LOCAL_SNAPSHOTS}"
@@ -221,6 +233,11 @@ destroy_old_snaps() {
     done
 }
 
+assert_pv_installed() {
+    which pv >/dev/null && return
+    log_error "pv not installed"
+    exit 1
+}
 
 print_usage() {
     echo "Usage: $0 [options] target remote_dataset local_dataset
@@ -229,7 +246,7 @@ print_usage() {
     -d N           Print N-th log level (1=DEBUG, 2=INFO, 3=WARNING, 4=ERROR)
 
     -h, --help           Print this usage message
-    -l, --label          Filter this label from snapshots (default: daily)
+    -l, --label          Filter this label from snapshots (default: zfs-auto-mirror)
     -p, --progress       Display data transfer information. 'pv' installation required
     -D, --destroy=DAYS   Destroy snapshots taken up to DAYS days ago
   
@@ -258,6 +275,7 @@ main() {
                 shift 2
                 ;;
             (-p|--progress)
+                assert_pv_installed
                 PROGRESS=1
                 shift 1
                 ;;
