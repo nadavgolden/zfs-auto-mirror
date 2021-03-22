@@ -21,7 +21,6 @@ Usage: zfs-auto-mirror [options] target remote_dataset local_dataset
     -d N           Print N-th log level (1=DEBUG, 2=INFO, 3=WARNING, 4=ERROR)
 
     -h, --help           Print this usage message
-    -l, --label          Filter this label from snapshots (default: zfs-auto-mirror)
     -p, --progress       Display data transfer information. 'pv' installation required
     -D, --destroy=DAYS   Destroy snapshots taken up to DAYS days ago
   

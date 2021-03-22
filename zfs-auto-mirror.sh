@@ -8,7 +8,6 @@ LOG_ERROR=4
 # Default values
 LOG_LEVEL=${LOG_WARNING}
 FORCE_MIRROR=0
-LABEL="zfs-auto-mirror"
 PROGRESS=0
 DESTROY_THRESHOLD=30
 DESTROY_OLD_SNAPS=0
@@ -106,6 +105,17 @@ create_remote_snapshot() {
     return $?
 }
 
+bookmark_remote_snapshot() {
+    local TARGET=$1
+    local REMOTE_DATASET=$2
+    local SNAPSHOT=$3
+
+    log_info "Creating bookmark ${REMOTE_DATASET}#${SNAPSHOT}"
+
+    ssh ${TARGET} "zfs bookmark ${REMOTE_DATASET}@${SNAPSHOT} \#${SNAPSHOT} && zfs destroy ${REMOTE_DATASET}@${SNAPSHOT}"
+    return $?
+}
+
 # mirror target remote_dataset local_dataset
 # target - user@host
 # remote_dataset - dataset to mirror from
@@ -121,36 +131,44 @@ mirror() {
         return 1
     fi
 
-    # if there is a resume token, continue last sync
-    TOKEN=$(zfs get -H -o value receive_resume_token ${LOCAL_DATASET})
-
-    if [ "${TOKEN}" != "-" ]; then
-        log_info "Resuming previously interrupted sync"
-        resume_sync ${TARGET} ${LOCAL_DATASET} ${TOKEN}
-    fi
-
     # create a snapshot
     NEW_SNAPSHOT_NAME=zfs-auto-mirror_$(date -u +%F-%H%M)
+
+    ssh ${TARGET} "zfs list -H -t bookmark -o name ${REMOTE_DATASET}\#${NEW_SNAPSHOT_NAME}" > /dev/null 2>&1
+
+    if [ $? -eq 0 ]; then
+        log_error "Remote bookmark ${REMOTE_DATASET}#${NEW_SNAPSHOT_NAME} already exists"
+        return 1
+    fi
+
     log_info "Creating \"${REMOTE_DATASET}@${NEW_SNAPSHOT_NAME}\""
     create_remote_snapshot ${TARGET} ${REMOTE_DATASET} ${NEW_SNAPSHOT_NAME}
     
     if [ $? -ne 0 ]; then
         log_error "Failed to create snapshot."
-        return $?
+        return 1
     fi
 
-    REMOTE_SNAPSHOTS=$(ssh ${TARGET} "zfs list -t snapshot -H -o name ${REMOTE_DATASET}" | grep ${LABEL} | sort -r | cut -d "@" -f2-)
-    LAST_REMOTE_SNAPSHOT=$(echo ${REMOTE_SNAPSHOTS} | head -n1 | awk '{print $1;}')
-    log_debug "Remote snapshots: ${REMOTE_SNAPSHOTS}"
+    REMOTE_BOOKMARKS=$(ssh ${TARGET} "zfs list -t bookmark -H -o guid -S creation ${REMOTE_DATASET}")
+    LAST_REMOTE_BOOKMARK=$(echo ${REMOTE_BOOKMARKS} | head -n1 | awk '{print $1;}')
+    log_debug "Remote bookmark: ${REMOTE_BOOKMARKS}"
 
     # if local dataset does not exist, do a full sync
     if [ -z "$(zfs list -H -o name | grep ${LOCAL_DATASET})" ]; then
-        log_error "Local dataset \"${LOCAL_DATASET}\" does not exist, starting full sync"
-        send_full_sync ${TARGET} ${REMOTE_DATASET}@${LAST_REMOTE_SNAPSHOT} ${LOCAL_DATASET}
+        log_warning "Local dataset \"${LOCAL_DATASET}\" does not exist, starting full sync"
+        send_full_sync ${TARGET} ${REMOTE_DATASET}@${NEW_SNAPSHOT_NAME} ${LOCAL_DATASET} || return $?
+        bookmark_remote_snapshot ${TARGET} ${REMOTE_DATASET} ${NEW_SNAPSHOT_NAME}
         return $?
     fi
 
-    LOCAL_SNAPSHOTS=$(zfs list -t snapshot -H -o name ${LOCAL_DATASET} | grep ${LABEL} | sort -r | cut -d "@" -f2-)
+    # if there is a resume token, continue last sync
+    TOKEN=$(zfs get -H -o value receive_resume_token ${LOCAL_DATASET})
+    if [ $? -eq 0 ] && [ "${TOKEN}" != "-" ]; then
+        log_info "Resuming previously interrupted sync"
+        resume_sync ${TARGET} ${LOCAL_DATASET} ${TOKEN}
+    fi
+
+    LOCAL_SNAPSHOTS=$(zfs list -t snapshot -H -o guid -S creation ${LOCAL_DATASET})
     LAST_LOCAL_SNAPSHOT=$(echo ${LOCAL_SNAPSHOTS} | head -n1 | awk '{print $1;}')
 
     log_debug "Local snapshots: ${LOCAL_SNAPSHOTS}"
@@ -158,8 +176,9 @@ mirror() {
     # if there are no local snpashots we cannot do an incremental
     if [ -z "${LOCAL_SNAPSHOTS}" ]; then
         log_info "No local snapshots, starting full sync"
-        send_full_sync ${TARGET} ${REMOTE_DATASET}@${LAST_REMOTE_SNAPSHOT} ${LOCAL_DATASET}
-        return $?
+        send_full_sync ${TARGET} ${REMOTE_DATASET}@${NEW_SNAPSHOT_NAME} ${LOCAL_DATASET}
+        bookmark_remote_snapshot ${TARGET} ${REMOTE_DATASET} ${NEW_SNAPSHOT_NAME}
+        return 1
     fi
 
     if [ "${LAST_LOCAL_SNAPSHOT}" = "${LAST_REMOTE_SNAPSHOT}" ]; then
@@ -170,20 +189,22 @@ mirror() {
     # try to find an incremental backup
     for LOCAL_SNAP in ${LOCAL_SNAPSHOTS}; do
         # if the current snapshot does not exist on the remote, we can't do an incremental with it
-        if [ -z "$(echo ${REMOTE_SNAPSHOTS} | grep ${LOCAL_SNAP})" ]; then
-            log_warning "Snapshot ${LOCAL_SNAP} not found in remote, skipping"
+        if [ -z "$(echo ${REMOTE_BOOKMARKS} | grep ${LOCAL_SNAP})" ]; then
+            log_warning "Bookmark ${LOCAL_SNAP} not found in remote, skipping"
             continue
-        fi 
+        fi
 
-        for REMOTE_SNAP in ${REMOTE_SNAPSHOTS}; do
-            if [ "${LOCAL_SNAP}" = "${REMOTE_SNAP}" ]; then
-                log_info "Comparing the same snapshot (${LOCAL_SNAP}), done"
-                return 0
-            fi
+        OLD=$(ssh ${TARGET} "zfs list -t bookmark -o name,guid -H" | grep ${LOCAL_SNAP} | cut -f1)
+        NEW="${REMOTE_DATASET}@${NEW_SNAPSHOT_NAME}"
 
-            log_debug "Current diff: from ${LOCAL_SNAP} to ${REMOTE_SNAP}"
-            send_incremental ${TARGET} ${REMOTE_DATASET}@${LOCAL_SNAP} ${REMOTE_DATASET}@${REMOTE_SNAP} ${LOCAL_DATASET} && return 0
-        done
+        send_incremental ${TARGET} ${OLD} ${NEW} ${LOCAL_DATASET}
+
+        if [ $? -ne 0 ]; then
+            log_error "Failed to send incremental sync"
+            return 1
+        fi
+
+        bookmark_remote_snapshot ${TARGET} ${REMOTE_DATASET} ${NEW_SNAPSHOT_NAME} && return 0
     done
 
     log_error "Failed to find valid incremental sync"
@@ -191,9 +212,18 @@ mirror() {
     if [ ${FORCE_MIRROR} -eq 1 ]; then
         log_warning "Forcing full sync"
         zfs destroy -r ${LOCAL_DATASET} || (log_error "Failed to destroy ${LOCAL_DATASET}" && return 1)
-        send_full_sync ${TARGET} ${REMOTE_DATASET}@${LAST_REMOTE_SNAPSHOT} ${LOCAL_DATASET} || (log_error "Failed to forcibly sync" && return 1)
+        send_full_sync ${TARGET} ${REMOTE_DATASET}@${LAST_REMOTE_SNAPSHOT} ${LOCAL_DATASET}
+        
+        if [ $? -ne 0 ]; then
+            log_error "Failed to forcibly sync"
+            bookmark_remote_snapshot ${TARGET} ${REMOTE_DATASET} ${NEW_SNAPSHOT_NAME}
+            return 1
+        fi
+        return 0
     fi
 
+    bookmark_remote_snapshot ${TARGET} ${REMOTE_DATASET} ${NEW_SNAPSHOT_NAME}
+    return 1
 }
 
 # destroy_old_snaps dataset
@@ -246,7 +276,6 @@ print_usage() {
     -d N           Print N-th log level (1=DEBUG, 2=INFO, 3=WARNING, 4=ERROR)
 
     -h, --help           Print this usage message
-    -l, --label          Filter this label from snapshots (default: zfs-auto-mirror)
     -p, --progress       Display data transfer information. 'pv' installation required
     -D, --destroy=DAYS   Destroy snapshots taken up to DAYS days ago
   
@@ -257,7 +286,7 @@ print_usage() {
 }
 
 main() {
-    GETOPT=$(getopt -o=fhpd:l:D: -l=label:,progress,help,destroy: -- $@) || exit 1
+    GETOPT=$(getopt -o=fhpd:D: -l=progress,help,destroy: -- $@) || exit 1
     eval set -- "${GETOPT}"
     
     while [ "$#" -gt 0 ]; do
@@ -265,10 +294,6 @@ main() {
             (-f)
                 FORCE_MIRROR=1
                 shift 1
-                ;;
-            (-l|--label)
-                LABEL=$2
-                shift 2
                 ;;
             (-d)
                 LOG_LEVEL=$2
@@ -316,7 +341,7 @@ main() {
     mirror ${TARGET} ${REMOTE_DATASET} ${LOCAL_DATASET}
 
     if [ $? -ne 0 ]; then
-        return $?
+        return 1
     fi
 
     if [ "${DESTROY_OLD_SNAPS}" -eq 1 ]; then
